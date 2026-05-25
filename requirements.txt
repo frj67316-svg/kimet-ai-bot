@@ -5,3 +5,4 @@ tiktok-api>=0.1.0
 google-auth>=2.23.0
 google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.127.0
+playwright>=1.38.0
