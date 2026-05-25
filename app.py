@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from flask import Flask, request, abort
 import requests
 from telegram import Update
@@ -16,15 +17,12 @@ if not TELEGRAM_TOKEN or not RENDER_EXTERNAL_URL:
 
 # ---------------------------------------------------------------------------
 # List of public free video generation endpoints (no auth required)
-# Each entry should point to an inference endpoint that accepts a JSON payload
-# with a "prompt" (or "inputs") field and returns a JSON response containing a
-# direct .mp4 URL under the key "url" (the exact key may differ â€“ see fallback).
 # ---------------------------------------------------------------------------
 VIDEO_MODELS = [
     {
         "name": "Stable Video Diffusion (Stability AI)",
         "endpoint": "https://api-inference.huggingface.co/models/stabilityai/stable-video-diffusion",
-        "input_key": "inputs",   # key expected by the API for the prompt
+        "input_key": "inputs",
         "output_key": "url"
     },
     {
@@ -37,7 +35,7 @@ VIDEO_MODELS = [
         "name": "OpenVideo (HuggingFace Spaces)",
         "endpoint": "https://huggingface.co/spaces/fffiloni/StableVideoDiffusion/api/predict",
         "input_key": "data",
-        "output_key": "video"  # Spaces often return {"video": "https://...mp4"}
+        "output_key": "video"
     }
 ]
 
@@ -49,8 +47,6 @@ def generate_video(prompt: str) -> str | None:
     Returns the URL string on success or None if all fail.
     """
     headers = {"Accept": "application/json"}
-    payload_template = {"prompt": prompt}
-
     for model in VIDEO_MODELS:
         endpoint = model["endpoint"]
         input_key = model.get("input_key", "inputs")
@@ -76,63 +72,75 @@ def generate_video(prompt: str) -> str | None:
 # ---------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "ط£ظ‡ظ„ط§ظ‹! ط£ط±ط³ظ„ ظ„ظٹ ط£ظٹ ظ†طµ ظˆط³ط£ظˆظ„ظ‘ط¯ ظ„ظƒ ظپظٹط¯ظٹظˆ ط¨ط§ط³طھط®ط¯ط§ظ… ظ†ظ…ط§ط°ط¬ ظ…ط¬ط§ظ†ظٹط© ظ…طھط§ط­ط© ط¹ط¨ط± ط§ظ„ط¥ظ†طھط±ظ†طھ."
+        "أهلاً! أرسل لي أي نص وسأولّد لك فيديو باستخدام نماذج مجانية متاحة عبر الإنترنت."
     )
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prompt = update.message.text.strip()
-    await update.message.reply_text("ط¬ط§ط±ظٹ طھظˆظ„ظٹط¯ ط§ظ„ظپظٹط¯ظٹظˆâ€¦ ظ‚ط¯ ظٹط³طھط؛ط±ظ‚ ط¹ط¯ط© ط«ظˆط§ظ†ظچ.")
+    await update.message.reply_text("جاري توليد الفيديو… قد يستغرق عدة ثوانٍ.")
     video_url = generate_video(prompt)
     if video_url:
-        # Telegram can send a video by URL directly; it streams without storing the file.
         try:
-            await update.message.reply_video(video_url, caption="ظ‡ط§ ظ‡ظˆ ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ط®ط§طµ ط¨ظƒ!")
+            await update.message.reply_video(video_url, caption="ها هو الفيديو الخاص بك!")
         except Exception as e:
             logging.error(f"Failed to send video via URL: {e}")
-            await update.message.reply_text("ظپط´ظ„ ط¥ط±ط³ط§ظ„ ط§ظ„ظپظٹط¯ظٹظˆ. ط­ط§ظˆظ„ ظ…ط±ط© ط£ط®ط±ظ‰ ظ„ط§ط­ظ‚ط§ظ‹.")
+            await update.message.reply_text("فشل إرسال الفيديو. حاول مرة أخرى لاحقاً.")
     else:
         await update.message.reply_text(
-            "ط¹ط°ط±ط§ظ‹طŒ ظ„ظ… ظ†طھظ…ظƒظ† ظ…ظ† طھظˆظ„ظٹط¯ ط§ظ„ظپظٹط¯ظٹظˆ ظ…ظ† ط£ظٹظچ ظ…ظ† ط§ظ„ظ†ظ…ط§ط°ط¬ ط§ظ„ظ…طھط§ط­ط© ط­ط§ظ„ظٹط§ظ‹."
+            "عذراً، لم نتمكن من توليد الفيديو من أيٍ من النماذج المتاحة حالياً."
         )
+
+# ---------------------------------------------------------------------------
+# Build the PTB application and register handlers (global, before Flask routes)
+# ---------------------------------------------------------------------------
+application = (
+    ApplicationBuilder()
+    .token(TELEGRAM_TOKEN)
+    .post_init(lambda app: logging.basicConfig(level=logging.INFO))
+    .build()
+)
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+bot = application.bot
 
 # ---------------------------------------------------------------------------
 # Flask app that receives webhook POSTs from Telegram
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
+# Health check endpoint
+@app.route('/', methods=['GET'])
+def health():
+    return "Bot is running", 200
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), bot)
-        # Dispatch update to PTB Application (runs async handlers)
-        asyncio.run(application.process_update(update))
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        # Schedule asynchronous processing without blocking the Flask request
+        asyncio.create_task(application.process_update(update))
         return "OK", 200
     else:
         abort(400)
 
 # ---------------------------------------------------------------------------
-# Main entry point â€“ set webhook and start Flask server
+# Main entry point – set webhook and start Flask server
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import asyncio
-    # Build PTB application
-    application = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .post_init(lambda app: logging.basicConfig(level=logging.INFO))
-        .build()
-    )
-    # Register handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
-    # Set webhook â€“ Render will expose the Flask app at RENDER_EXTERNAL_URL
-    webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/webhook"
-    # `bot` is created lazily by PTB; we need a reference for the Flask route.
-    bot = application.bot
-    bot.set_webhook(url=webhook_url)
-    logging.info(f"Webhook set to {webhook_url}")
-
-    # Run Flask (Render expects the app to listen on the PORT env var)
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    async def start():
+        # Set webhook – Render will expose the Flask app at RENDER_EXTERNAL_URL
+        webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/webhook"
+        if webhook_url.lower().startswith('https://'):
+            try:
+                await application.bot.set_webhook(url=webhook_url)
+                logging.info(f"Webhook set to {webhook_url}")
+            except Exception as e:
+                logging.error(f"Failed to set webhook: {e}")
+        else:
+            logging.warning("Webhook URL is not HTTPS; skipping webhook registration for local testing.")
+        # Run Flask (Render expects the app to listen on the PORT env var)
+        port = int(os.getenv("PORT", 8080))
+        app.run(host="0.0.0.0", port=port)
+    asyncio.run(start())
