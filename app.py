@@ -1,50 +1,52 @@
 import os
 import logging
 import asyncio
-from flask import Flask, request, abort
+import random
+from flask import Flask, jsonify
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from threading import Thread
+
+# Local imports for upload utilities
+from utils.tiktok import upload_to_tiktok
+from utils.youtube import upload_to_youtube
 
 # ---------------------------------------------------------------------------
-# Configuration (read from environment variables)
+# Configuration
 # ---------------------------------------------------------------------------
-TELEGRAM_TOKEN = "8857728669:AAFEnIedcN_IEx4CJbxJQPpow3T6ZUQjyeI"
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g. https://my-bot.onrender.com
+# Interval (seconds) for generating and publishing videos – default 4 hours (14400s).
+GEN_INTERVAL = int(os.getenv('GEN_INTERVAL_SECONDS', 14400))
 
-if not TELEGRAM_TOKEN or not RENDER_EXTERNAL_URL:
-    raise RuntimeError("Missing required environment variables: TELEGRAM_TOKEN and/or RENDER_EXTERNAL_URL")
+# Optional list of prompts (comma‑separated) – fallback to a small default list.
+PROMPT_LIST = os.getenv("PROMPTS", "حقيقة غريبة,لغز غامض,معلومة مثيرة").split(",")
 
 # ---------------------------------------------------------------------------
-# List of public free video generation endpoints (no auth required)
+# Video generation models (same as before)
 # ---------------------------------------------------------------------------
 VIDEO_MODELS = [
     {
         "name": "Stable Video Diffusion (Stability AI)",
         "endpoint": "https://api-inference.huggingface.co/models/stabilityai/stable-video-diffusion",
         "input_key": "inputs",
-        "output_key": "url"
+        "output_key": "url",
     },
     {
         "name": "VideoCrafter (ByteDance)",
         "endpoint": "https://api-inference.huggingface.co/models/ByteDance/VideoCrafter",
         "input_key": "inputs",
-        "output_key": "url"
+        "output_key": "url",
     },
     {
         "name": "OpenVideo (HuggingFace Spaces)",
         "endpoint": "https://huggingface.co/spaces/fffiloni/StableVideoDiffusion/api/predict",
         "input_key": "data",
-        "output_key": "video"
-    }
+        "output_key": "video",
+    },
 ]
 
-# ---------------------------------------------------------------------------
-# Helper: request video generation with fallback logic
-# ---------------------------------------------------------------------------
+
 def generate_video(prompt: str) -> str | None:
-    """Try each model in VIDEO_MODELS until one returns a usable .mp4 URL.
-    Returns the URL string on success or None if all fail.
+    """Generate a video from *prompt* using the first available model.
+    Returns the local temporary path to the downloaded ``.mp4`` file or ``None`` on failure.
     """
     headers = {"Accept": "application/json"}
     for model in VIDEO_MODELS:
@@ -59,7 +61,18 @@ def generate_video(prompt: str) -> str | None:
             video_url = data.get(output_key)
             if video_url and video_url.lower().endswith('.mp4'):
                 logging.info(f"Video generated via {model['name']} -> {video_url}")
-                return video_url
+                # download to a temporary file
+                try:
+                    vid_resp = requests.get(video_url, stream=True, timeout=30)
+                    vid_resp.raise_for_status()
+                    temp_path = os.path.join(os.getcwd(), "temp_video.mp4")
+                    with open(temp_path, "wb") as f:
+                        for chunk in vid_resp.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    return temp_path
+                except Exception as dl_err:
+                    logging.error(f"Failed to download video from {video_url}: {dl_err}")
+                    return None
             else:
                 logging.warning(f"Model {model['name']} did not return a .mp4 URL. Response: {data}")
         except Exception as e:
@@ -67,80 +80,60 @@ def generate_video(prompt: str) -> str | None:
             continue
     return None
 
-# ---------------------------------------------------------------------------
-# Telegram bot handlers
-# ---------------------------------------------------------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "أهلاً! أرسل لي أي نص وسأولّد لك فيديو باستخدام نماذج مجانية متاحة عبر الإنترنت."
-    )
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    prompt = update.message.text.strip()
-    await update.message.reply_text("جاري توليد الفيديو… قد يستغرق عدة ثوانٍ.")
-    video_url = generate_video(prompt)
-    if video_url:
-        try:
-            await update.message.reply_video(video_url, caption="ها هو الفيديو الخاص بك!")
-        except Exception as e:
-            logging.error(f"Failed to send video via URL: {e}")
-            await update.message.reply_text("فشل إرسال الفيديو. حاول مرة أخرى لاحقاً.")
-    else:
-        await update.message.reply_text(
-            "عذراً، لم نتمكن من توليد الفيديو من أيٍ من النماذج المتاحة حالياً."
-        )
+def pick_prompt() -> str:
+    """Select a random prompt from ``PROMPT_LIST``.
+    ``PROMPT_LIST`` can be overridden via the ``PROMPTS`` environment variable.
+    """
+    return random.choice(PROMPT_LIST).strip()
 
 # ---------------------------------------------------------------------------
-# Build the PTB application and register handlers (global, before Flask routes)
+# Background worker – runs forever, generating and publishing videos.
 # ---------------------------------------------------------------------------
-application = (
-    ApplicationBuilder()
-    .token(TELEGRAM_TOKEN)
-    .post_init(lambda app: logging.basicConfig(level=logging.INFO))
-    .build()
-)
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-bot = application.bot
+async def video_worker():
+    while True:
+        prompt = pick_prompt()
+        logging.info(f"Generating video for prompt: {prompt}")
+        video_path = generate_video(prompt)
+        if video_path:
+            try:
+                # Upload to TikTok
+                if upload_to_tiktok(video_path):
+                    logging.info("Video successfully uploaded to TikTok.")
+                else:
+                    logging.error("TikTok upload failed.")
+                # Upload to YouTube Shorts
+                if upload_to_youtube(video_path):
+                    logging.info("Video successfully uploaded to YouTube Shorts.")
+                else:
+                    logging.error("YouTube upload failed.")
+            finally:
+                # Clean up temporary file
+                try:
+                    os.remove(video_path)
+                    logging.info(f"Removed temporary video file {video_path}")
+                except Exception as rm_err:
+                    logging.warning(f"Could not delete temporary video file: {rm_err}")
+        else:
+            logging.error("Video generation failed for all models.")
+        logging.info(f"Sleeping for {GEN_INTERVAL} seconds before next generation cycle.")
+        await asyncio.sleep(GEN_INTERVAL)
 
 # ---------------------------------------------------------------------------
-# Flask app that receives webhook POSTs from Telegram
+# Flask web service (minimal) – provides health check.
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
-# Health check endpoint
-@app.route('/', methods=['GET'])
+@app.route("/", methods=["GET"])
 def health():
-    return "Bot is running", 200
+    return jsonify({"status": "ok"}), 200
 
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        # Schedule asynchronous processing without blocking the Flask request
-        asyncio.create_task(application.process_update(update))
-        return "OK", 200
-    else:
-        abort(400)
-
-# ---------------------------------------------------------------------------
-# Main entry point – set webhook and start Flask server
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import asyncio
-    async def start():
-        # Set webhook – Render will expose the Flask app at RENDER_EXTERNAL_URL
-        webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/webhook"
-        if webhook_url.lower().startswith('https://'):
-            try:
-                await application.bot.set_webhook(url=webhook_url)
-                logging.info(f"Webhook set to {webhook_url}")
-            except Exception as e:
-                logging.error(f"Failed to set webhook: {e}")
-        else:
-            logging.warning("Webhook URL is not HTTPS; skipping webhook registration for local testing.")
-        # Run Flask (Render expects the app to listen on the PORT env var)
-        port = int(os.getenv("PORT", 8080))
+    logging.basicConfig(level=logging.INFO)
+    # Start Flask in a daemon thread.
+    def run_flask():
+        port = int(os.getenv("PORT", "8080"))
         app.run(host="0.0.0.0", port=port)
-    asyncio.run(start())
+    Thread(target=run_flask, daemon=True).start()
+    # Run the async video worker until the process is terminated.
+    asyncio.run(video_worker())
