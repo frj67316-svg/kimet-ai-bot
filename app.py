@@ -9,6 +9,7 @@ import time
 
 # Local imports for upload utilities
 from utils.tiktok import upload_to_tiktok
+from utils.cookie_manager import periodic_refresh
 from utils.youtube import upload_to_youtube
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,8 @@ def pick_prompt() -> str:
 # Background worker – runs forever, generating and publishing videos.
 # ---------------------------------------------------------------------------
 async def video_worker():
+    # Start periodic cookie refresh (runs in background)
+    asyncio.create_task(periodic_refresh())
     while True:
         prompt = pick_prompt()
         logging.info(f"Generating video for prompt: {prompt}")
