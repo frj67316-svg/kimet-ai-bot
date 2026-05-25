@@ -1,9 +1,9 @@
 import os
 import logging
 from flask import Flask, request, jsonify, abort
-from src.utils.tiktok import TikTokUploader
-from src.utils.youtube import YouTubeUploader
-from src.utils.cookie_manager import CookieManager
+from .utils.tiktok import TikTokUploader
+from .utils.youtube import YouTubeUploader
+from .utils.cookie_manager import CookieManager
 
 # Configure logging
 logging.basicConfig(
