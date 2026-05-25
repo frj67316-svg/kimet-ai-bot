@@ -5,6 +5,7 @@ import random
 from flask import Flask, jsonify
 import requests
 from threading import Thread
+import time
 
 # Local imports for upload utilities
 from utils.tiktok import upload_to_tiktok
@@ -131,6 +132,21 @@ def health():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     # Start Flask in a daemon thread.
+    # Self‑ping thread to keep Render awake (every 10 min).
+    def self_ping():
+        url = os.getenv("RENDER_EXTERNAL_URL")
+        if not url:
+            port = int(os.getenv("PORT", "8080"))
+            url = f"http://127.0.0.1:{port}/"
+        while True:
+            try:
+                requests.get(url, timeout=10)
+                logging.info("Self‑ping succeeded")
+            except Exception as e:
+                logging.warning(f"Self‑ping failed: {e}")
+            time.sleep(600)
+    # Start self-ping thread
+    Thread(target=self_ping, daemon=True).start()
     def run_flask():
         port = int(os.getenv("PORT", "8080"))
         app.run(host="0.0.0.0", port=port)
