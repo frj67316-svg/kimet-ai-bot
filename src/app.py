@@ -37,19 +37,19 @@ def upload_video():
         video_path = data.get("video_path")
         title = data.get("title")
         description = data.get("description", "")
-        
+
         if not all([platform, video_path, title]):
             return jsonify({"error": "Missing required fields"}), 400
-        
+
         if platform.lower() == "tiktok":
             result = tiktok_uploader.upload(video_path, title, description)
         elif platform.lower() == "youtube":
             result = youtube_uploader.upload(video_path, title, description)
         else:
             return jsonify({"error": "Unsupported platform"}), 400
-        
+
         return jsonify(result), 200
-        
+
     except Exception as e:
         logger.error(f"Upload failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -64,6 +64,6 @@ def status():
     }), 200
 
 if __name__ == "__main__":
-    # Run Flask server
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # Run Flask server on port from environment or default 7860
+    port = int(os.environ.get('PORT', 7860))
+    app.run(host='0.0.0.0', port=port)
