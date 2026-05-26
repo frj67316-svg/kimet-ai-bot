@@ -1,8 +1,4 @@
-Flask>=2.3.0
-python-telegram-bot>=20.0
-requests>=2.31.0
-tiktok-api>=0.1.0
-google-auth>=2.23.0
-google-auth-oauthlib>=1.2.0
-google-api-python-client>=2.127.0
-playwright>=1.38.0
+fastapi
+uvicorn
+httpx
+python-dotenv
